@@ -1,2 +1,3 @@
 Branch: https://github.com/djgilcrease/t3code/tree/t3/create-plugin-system
 Requires: environment-activity, thread-details with environment targeting, plugin-commands, beforeRemove, auth mcp issue
+Verified host commit: c38a42917731a38550662ed75438d74a7eaffb08

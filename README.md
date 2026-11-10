@@ -20,7 +20,7 @@ Before a controlled stop, the guest attempts to pause turns and checkpoint them;
 
 Boat keeps an independent stop deadline. Docker has no independent provider deadline, so its idle and lifetime limits require the controller to remain online. Usage shows runtime and estimated cost at each profile’s configured hourly rate. The monthly budget refuses creation and resume at the estimated cap; setting a budget without a rate refuses creation. Provider invoices remain authoritative.
 
-Keep the plugin enabled until resources have stopped. Disabling it removes policy enforcement. The provider lease remains the fallback for Boat.
+Disable and Remove are guarded while managed resources remain. Stop and delete those resources first. On removal, transcripts are copied into `sandbox-archives` under the T3 home before the host clears plugin data. A crash or manual configuration edit still leaves the provider lease as the fallback for Boat.
 
 ## Optional Rehome
 
