@@ -6,7 +6,7 @@ import * as PubSub from "effect/PubSub";
 import * as Schedule from "effect/Schedule";
 import { readFile, cp, mkdir } from "node:fs/promises";
 import { watch } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { timingSafeEqual } from "node:crypto";
 import { createController } from "./controller.mjs";

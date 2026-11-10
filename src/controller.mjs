@@ -133,7 +133,17 @@ export async function createController({
         }
       }
       row.stage = "Inspecting resource";
-      const observed = await d.get(row.ref);
+      let observed;
+      try {
+        observed = await d.get(row.ref);
+      } catch (cause) {
+        const inventory = await d.list();
+        if (inventory.some((item) => item.ref === row.ref)) throw cause;
+        row.state = "deleted";
+        row.desired = "deleted";
+        await save();
+        return;
+      }
       if (row.orphan && row.desired === "stopped") {
         if (observed.state === "running") await d.stop(row.ref);
         row.state = "stopped";

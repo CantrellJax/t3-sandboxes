@@ -27,7 +27,10 @@ async function fixture(t) {
       if (failCreate) throw new Error("Lost response");
       return x;
     },
-    get: async () => resources[0],
+    get: async () => {
+      if (!resources[0]) throw new Error("missing");
+      return resources[0];
+    },
     start: async () => {
       resources[0].state = "running";
     },
@@ -89,6 +92,7 @@ async function fixture(t) {
     tick: () => controller.tick(),
     row: () => controller.snapshot().rows[0],
     counts: () => ({ creates, stops, removes }),
+    deleteOutside: () => resources.splice(0, 1),
     reporterKey: () => storage.get(`reporter-${controller.snapshot().rows[0].id}`),
     setActivity: (x) => {
       activity = x;
@@ -205,4 +209,14 @@ test("a quick resume keeps the reporter and optional Rehome credential valid for
   await f.c.action(id, "running");
   await f.tick();
   assert.equal(f.reporterKey(), key);
+});
+
+test("a provider resource deleted externally is recorded as deleted without creating a replacement", async (t) => {
+  const f = await fixture(t);
+  await f.create();
+  await f.tick();
+  f.deleteOutside();
+  await f.tick();
+  assert.equal(f.row().state, "deleted");
+  assert.equal(f.counts().creates, 1);
 });

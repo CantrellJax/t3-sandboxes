@@ -69,17 +69,6 @@ export class Guest {
       permission: "orchestration:read",
     });
   }
-  async legacyActivity() {
-    const threads = await this.threads();
-    const open = threads.filter((t) => !t.archived && !t.settled && !t.snoozed);
-    return {
-      threads,
-      closed: threads.length > 0 && open.length === 0,
-      active: open.some((t) => ["preparing", "queued", "starting", "running"].includes(t.status)),
-      waiting: open.some((t) => t.status === "waiting" || t.pendingRequestCount > 0),
-      lastActivity: Math.max(0, ...threads.map((t) => Date.parse(t.updatedAt) || 0)),
-    };
-  }
   async transcript(threadId) {
     const items = [];
     let afterPosition;
