@@ -4,14 +4,23 @@ export const defaults = Object.freeze({
   unattendedMinutes: 120,
   continuousMinutes: 720,
   deleteDays: 7,
+  deleteOnThreadDelete: true,
   maxRunning: 3,
   monthlyBudget: 0,
 });
 export function policy(input = {}) {
   const result = { ...defaults, ...input };
-  for (const [key, value] of Object.entries(result))
-    if (!Object.hasOwn(defaults, key) || !Number.isFinite(value) || value < 0 || value > 525600)
+  for (const [key, value] of Object.entries(result)) {
+    if (key === "deleteOnThreadDelete") {
+      if (typeof value !== "boolean") throw new Error(`Invalid policy: ${key}`);
+    } else if (
+      !Object.hasOwn(defaults, key) ||
+      !Number.isFinite(value) ||
+      value < 0 ||
+      value > 525600
+    )
       throw new Error(`Invalid policy: ${key}`);
+  }
   for (const key of [
     "idleMinutes",
     "waitingMinutes",

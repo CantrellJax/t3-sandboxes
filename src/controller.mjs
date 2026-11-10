@@ -1,11 +1,12 @@
 import { readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID, randomBytes } from "node:crypto";
-import { atomic, safeUrl } from "./io.mjs";
+import { atomic, safeUrl, quote } from "./io.mjs";
 import { driver, bootstrap, pairingScript } from "./drivers.mjs";
 import { Guest } from "./mcp.mjs";
 import { policy, decide, deadline } from "./policy.mjs";
 import { usage } from "./billing.mjs";
+import { workspaceSafetyScript } from "./safety.mjs";
 export async function createController({
   directory,
   secrets,
@@ -29,6 +30,7 @@ export async function createController({
     state = { version: 1, owner: randomUUID(), policy: policy(), profiles: [], rows: [] };
     await atomic(file, state);
   }
+  state.policy = policy(state.policy);
   let tail = Promise.resolve();
   let saveTail = Promise.resolve();
   const workers = new Map();
@@ -96,7 +98,7 @@ export async function createController({
           await getDriver(row)
         ).exec(
           row.ref,
-          `cd /home/user/t3-sandbox/repo && git fetch origin >/dev/null 2>&1 && if [ -z "$(git status --porcelain)" ] && [ "$(git rev-list --count HEAD --not --remotes)" = 0 ]; then printf safe; else printf unsafe; fi`,
+          `node -e ${quote(workspaceSafetyScript("/home/user/t3-sandbox/repo"))}`,
         )) === "safe";
     } catch {
       row.workSafe = false;
@@ -222,8 +224,13 @@ export async function createController({
             title: row.title,
             ...(row.message ? { message: row.message } : {}),
             ...(row.modelSelection ? { modelSelection: row.modelSelection } : {}),
+            ...(row.runtimeMode ? { runtimeMode: row.runtimeMode } : {}),
             clientRequestId: row.id,
-            workspaceStrategy: { type: "root" },
+            workspaceStrategy: {
+              type: "worktree",
+              baseRef: row.base,
+              branch: `sandbox/${row.id.slice(0, 8)}`,
+            },
           });
           row.threadId = result.threadId;
           row.message = null;
@@ -255,6 +262,7 @@ export async function createController({
           if (activity.waiting) row.waitingSince ??= now();
           else row.waitingSince = null;
           row.activity = activity;
+          row.lastThreadDeleted = activity.threads?.length === 0;
         }
         const action = decide(row, activity, now(), state.policy);
         if (action === "stopped") {
@@ -293,9 +301,14 @@ export async function createController({
         await secrets.remove(`guest-${row.id}`);
         await secrets.remove(`reporter-${row.id}`);
       }
+      row.failures = 0;
+      row.nextAttemptAt = null;
       await save();
     } catch (cause) {
       diagnostic(row.stage, cause);
+      row.failures = (row.failures ?? 0) + 1;
+      row.nextAttemptAt = now() + Math.min(900000, 30000 * 2 ** Math.min(row.failures - 1, 5));
+      if (row.failures >= 5 && !row.threadId && row.desired === "running") row.desired = "stopped";
       row.error = `Could not complete ${row.stage ?? "provider operation"}. Check the profile and connectivity; provider data was retained.`;
       if (row.state !== "running") row.state = "error";
       await save();
@@ -306,7 +319,7 @@ export async function createController({
     row.state = "stopping";
     await save();
     // A failed export keeps the machine until its provider lease expires.
-    if (row.threadId) await retain(row);
+    if (row.threadId || row.bootstrapped) await retain(row);
     await d.stop(row.ref);
     row.state = (await d.get(row.ref)).state;
     if (row.state !== "stopped") {
@@ -390,6 +403,7 @@ export async function createController({
           base: input.base,
           message: input.message ?? null,
           modelSelection: input.modelSelection ?? null,
+          runtimeMode: input.runtimeMode ?? null,
           state: "starting",
           desired: "running",
           startedAt: now(),
@@ -450,6 +464,8 @@ export async function createController({
             row.resumeRequested = true;
           }
           row.desired = action;
+          row.failures = 0;
+          row.nextAttemptAt = null;
           row.confirmDelete = input.confirm === true;
         } else throw new Error("Unknown action");
         await save();
@@ -497,8 +513,9 @@ export async function createController({
           row.state === "stopped" &&
           row.desired === "stopped" &&
           !row.pinned &&
-          state.policy.deleteDays > 0 &&
-          now() >= row.stoppedAt + state.policy.deleteDays * 86400000
+          ((state.policy.deleteOnThreadDelete && row.lastThreadDeleted) ||
+            (state.policy.deleteDays > 0 &&
+              now() >= row.stoppedAt + state.policy.deleteDays * 86400000))
         ) {
           if (row.retainedAt && (row.workSafe || row.rehomed)) {
             row.desired = "deleted";
@@ -510,6 +527,7 @@ export async function createController({
         }
         if (row.state === "deleted" || (row.state === "stopped" && row.desired === "stopped"))
           continue;
+        if (row.nextAttemptAt > now()) continue;
         let worker = workers.get(row.id);
         if (!worker) {
           worker = reconcile(row).finally(() => workers.delete(row.id));

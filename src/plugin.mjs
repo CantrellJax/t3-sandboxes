@@ -12,6 +12,7 @@ import { timingSafeEqual } from "node:crypto";
 import { createController } from "./controller.mjs";
 import { tone } from "./policy.mjs";
 import { Guest } from "./mcp.mjs";
+import { launchProject, launchSandbox } from "./launch.mjs";
 class PluginError extends Schema.TaggedError()("PluginError", {
   operation: Schema.String,
   cause: Schema.Defect(),
@@ -128,7 +129,9 @@ function settings(controller) {
         "policy",
         "Save cost policy",
         "policy",
-        Object.entries(state.policy).map(([key, value]) => field(key, key, "number", value)),
+        Object.entries(state.policy).map(([key, value]) =>
+          field(key, key, typeof value === "boolean" ? "boolean" : "number", value),
+        ),
       ),
       form("adopt", "Adopt an orphaned sandbox", "adopt", [
         field("id", "Orphan sandbox ID"),
@@ -377,6 +380,12 @@ export default {
           }),
         changes: Stream.fromPubSub(changes),
         commands: [
+          descriptor("launch", "Start a sandboxed project thread", (input) =>
+            mutate(() => launchSandbox(controller, input)),
+          ),
+          descriptor("cancel", "Cancel provisioning and delete sandbox", (input) =>
+            mutate(() => controller.action(input.id, "deleted", { confirm: true })),
+          ),
           descriptor("profile", "Configure provider profile", (input) =>
             controller.configure(input),
           ),
@@ -420,6 +429,132 @@ export default {
           ),
         ],
         views: [
+          {
+            id: "launcher",
+            title: "New sandbox",
+            location: "environment-launcher",
+            permission: "environment:maintain",
+            read: (input = {}) =>
+              call("launcher", async () => {
+                const state = controller.snapshot();
+                const row = state.rows.find((row) => row.id === input.requestId);
+                if (row)
+                  return {
+                    title: "New sandbox",
+                    blocks: [
+                      {
+                        id: "progress",
+                        kind: "text",
+                        text: row.error ?? `${row.state}: ${row.stage ?? row.title}`,
+                      },
+                      {
+                        id: "control",
+                        kind: "actions",
+                        actions:
+                          row.state === "starting"
+                            ? [
+                                action(
+                                  "cancel",
+                                  "Cancel provisioning and delete sandbox",
+                                  "cancel",
+                                  { id: row.id },
+                                ),
+                              ]
+                            : row.state === "error"
+                              ? [
+                                  action("retry", "Retry", "state", {
+                                    id: row.id,
+                                    state: "running",
+                                  }),
+                                ]
+                              : [],
+                      },
+                    ],
+                  };
+                if (!state.profiles.length)
+                  return {
+                    title: "New sandbox",
+                    blocks: [
+                      {
+                        id: "configure",
+                        kind: "text",
+                        text: "Configure a provider profile in Settings → Extensions → Sandboxes first.",
+                      },
+                    ],
+                  };
+                if (input.hasAttachments)
+                  return {
+                    title: "New sandbox",
+                    blocks: [
+                      {
+                        id: "attachments",
+                        kind: "text",
+                        text: "Start with a text-only first message. Remove draft attachments and local context before choosing New sandbox.",
+                      },
+                    ],
+                  };
+                const project = await launchProject(input);
+                return {
+                  title: "New sandbox",
+                  blocks: [
+                    {
+                      id: "scope",
+                      kind: "text",
+                      text: "The controller starts this thread from a pushed commit. Uncommitted local work stays here. After Send, provisioning continues if you lock your phone.",
+                    },
+                    form(
+                      "launch",
+                      "Send and start sandbox",
+                      "launch",
+                      [
+                        {
+                          name: "profile",
+                          label: "Provider profile",
+                          kind: "select",
+                          required: true,
+                          value: state.profiles[0].id,
+                          options: state.profiles.map((p) => ({ label: p.id, value: p.id })),
+                        },
+                        field("title", "Thread title", "text", String(input.title ?? "Sandbox")),
+                        field("base", "Pushed base commit", "text", project.base),
+                        field("message", "First message", "text", String(input.message ?? "")),
+                      ],
+                      {
+                        projectDirectory: project.directory,
+                        requestId: input.requestId,
+                        modelSelection: input.modelSelection ?? null,
+                        runtimeMode: input.runtimeMode ?? null,
+                      },
+                    ),
+                  ],
+                };
+              }),
+          },
+          {
+            id: "environments",
+            title: "Managed sandbox environments",
+            location: "managed-environments",
+            permission: "environment:maintain",
+            read: () =>
+              Effect.succeed({
+                title: "Managed sandbox environments",
+                blocks: controller
+                  .snapshot()
+                  .rows.filter((row) => row.environmentId && row.url)
+                  .slice(-100)
+                  .map((row) => ({
+                    id: row.id.replace(/^[0-9]/, "s$&"),
+                    kind: "environment",
+                    environmentId: row.environmentId,
+                    label: row.title ?? row.profile,
+                    url: row.url,
+                    state: row.state,
+                    ...(row.threadId ? { threadId: row.threadId } : {}),
+                    launchRequestId: row.id,
+                    connect: action("connect", "Connect", "pair", { id: row.id }),
+                  })),
+              }),
+          },
           {
             id: "managed-status",
             title: "Managed sandboxes",

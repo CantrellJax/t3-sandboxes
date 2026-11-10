@@ -1,10 +1,13 @@
-import { cp, mkdir, mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { cp, mkdir, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { watch } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
+// \0rolldown/runtime.js
+var __require = /* #__PURE__ */ (() => createRequire(import.meta.url))();
 // node_modules/effect/dist/Pipeable.js
 /**
 * The `Pipeable` module defines the shared interface and implementation helpers
@@ -15413,19 +15416,12 @@ var Guest = class {
 		return result.structuredContent ?? JSON.parse(result.content.find((x) => x.type === "text").text);
 	}
 	async threads() {
-		const all = [];
-		let cursor;
-		do {
-			const page = await this.call("t3_thread_list", {
-				limit: 100,
-				allProjects: true,
-				includeSubagents: true,
-				...cursor === void 0 ? {} : { cursor }
-			});
-			all.push(...page.threads);
-			cursor = page.nextCursor;
-		} while (cursor !== null && cursor !== void 0);
-		return all;
+		const activity = await this.activity();
+		if (!Array.isArray(activity.threads)) throw new Error("Guest host does not supply the complete thread roster");
+		return activity.threads.map((thread) => ({
+			threadId: thread.threadId,
+			relationshipToParent: thread.subagent ? "subagent" : null
+		}));
 	}
 	async activity() {
 		return this.call("t3_plugin_read", {
@@ -15478,6 +15474,7 @@ const defaults = Object.freeze({
 	unattendedMinutes: 120,
 	continuousMinutes: 720,
 	deleteDays: 7,
+	deleteOnThreadDelete: true,
 	maxRunning: 3,
 	monthlyBudget: 0
 });
@@ -15486,7 +15483,9 @@ function policy(input = {}) {
 		...defaults,
 		...input
 	};
-	for (const [key, value] of Object.entries(result)) if (!Object.hasOwn(defaults, key) || !Number.isFinite(value) || value < 0 || value > 525600) throw new Error(`Invalid policy: ${key}`);
+	for (const [key, value] of Object.entries(result)) if (key === "deleteOnThreadDelete") {
+		if (typeof value !== "boolean") throw new Error(`Invalid policy: ${key}`);
+	} else if (!Object.hasOwn(defaults, key) || !Number.isFinite(value) || value < 0 || value > 525600) throw new Error(`Invalid policy: ${key}`);
 	for (const key of [
 		"idleMinutes",
 		"waitingMinutes",
@@ -15546,6 +15545,43 @@ function usage(rows, profiles, now) {
 		monthCost: items.reduce((total, item) => total + item.monthCost, 0)
 	};
 }
+// src/safety.mjs
+function workspaceSafetyScript(directory) {
+	return `(${inspect.toString()})(${JSON.stringify(directory)})`;
+}
+function inspect(directory) {
+	const { execFileSync: run } = __require("node:child_process");
+	const git = (path, args) => run("git", [
+		"-C",
+		path,
+		...args
+	], {
+		encoding: "utf8",
+		stdio: [
+			"ignore",
+			"pipe",
+			"ignore"
+		]
+	}).trim();
+	git(directory, [
+		"fetch",
+		"--all",
+		"--prune"
+	]);
+	const paths = git(directory, [
+		"worktree",
+		"list",
+		"--porcelain",
+		"-z"
+	]).split("\0").filter((line) => line.startsWith("worktree ")).map((line) => line.slice(9));
+	process.stdout.write(paths.length > 0 && paths.every((path) => !git(path, ["status", "--porcelain"]) && git(path, [
+		"rev-list",
+		"--count",
+		"HEAD",
+		"--not",
+		"--remotes"
+	]) === "0") ? "safe" : "unsafe");
+}
 // src/controller.mjs
 async function createController({ directory, secrets, source, changed = () => {}, diagnostic = () => {}, preserve = async () => false, drivers = driver, guest = (url, token) => new Guest(url, token), now = Date.now }) {
 	await mkdir(directory, {
@@ -15568,6 +15604,7 @@ async function createController({ directory, secrets, source, changed = () => {}
 		};
 		await atomic(file, state);
 	}
+	state.policy = policy(state.policy);
 	let tail = Promise.resolve();
 	let saveTail = Promise.resolve();
 	const workers = /* @__PURE__ */ new Map();
@@ -15624,7 +15661,7 @@ async function createController({ directory, secrets, source, changed = () => {}
 			row.rehomed = false;
 		}
 		try {
-			row.workSafe = paused && await (await getDriver(row)).exec(row.ref, `cd /home/user/t3-sandbox/repo && git fetch origin >/dev/null 2>&1 && if [ -z "$(git status --porcelain)" ] && [ "$(git rev-list --count HEAD --not --remotes)" = 0 ]; then printf safe; else printf unsafe; fi`) === "safe";
+			row.workSafe = paused && await (await getDriver(row)).exec(row.ref, `node -e ${quote(workspaceSafetyScript("/home/user/t3-sandbox/repo"))}`) === "safe";
 		} catch {
 			row.workSafe = false;
 		}
@@ -15754,8 +15791,13 @@ async function createController({ directory, secrets, source, changed = () => {}
 						title: row.title,
 						...row.message ? { message: row.message } : {},
 						...row.modelSelection ? { modelSelection: row.modelSelection } : {},
+						...row.runtimeMode ? { runtimeMode: row.runtimeMode } : {},
 						clientRequestId: row.id,
-						workspaceStrategy: { type: "root" }
+						workspaceStrategy: {
+							type: "worktree",
+							baseRef: row.base,
+							branch: `sandbox/${row.id.slice(0, 8)}`
+						}
 					})).threadId;
 					row.message = null;
 					await save();
@@ -15780,6 +15822,7 @@ async function createController({ directory, secrets, source, changed = () => {}
 					if (activity.waiting) row.waitingSince ??= now();
 					else row.waitingSince = null;
 					row.activity = activity;
+					row.lastThreadDeleted = activity.threads?.length === 0;
 				}
 				if (decide(row, activity, now(), state.policy) === "stopped") {
 					row.desired = "stopped";
@@ -15812,9 +15855,14 @@ async function createController({ directory, secrets, source, changed = () => {}
 				await secrets.remove(`guest-${row.id}`);
 				await secrets.remove(`reporter-${row.id}`);
 			}
+			row.failures = 0;
+			row.nextAttemptAt = null;
 			await save();
 		} catch (cause) {
 			diagnostic(row.stage, cause);
+			row.failures = (row.failures ?? 0) + 1;
+			row.nextAttemptAt = now() + Math.min(9e5, 3e4 * 2 ** Math.min(row.failures - 1, 5));
+			if (row.failures >= 5 && !row.threadId && row.desired === "running") row.desired = "stopped";
 			row.error = `Could not complete ${row.stage ?? "provider operation"}. Check the profile and connectivity; provider data was retained.`;
 			if (row.state !== "running") row.state = "error";
 			await save();
@@ -15824,7 +15872,7 @@ async function createController({ directory, secrets, source, changed = () => {}
 		if (row.state === "stopped") return;
 		row.state = "stopping";
 		await save();
-		if (row.threadId) await retain(row);
+		if (row.threadId || row.bootstrapped) await retain(row);
 		await d.stop(row.ref);
 		row.state = (await d.get(row.ref)).state;
 		if (row.state !== "stopped") {
@@ -15898,6 +15946,7 @@ async function createController({ directory, secrets, source, changed = () => {}
 				base: input.base,
 				message: input.message ?? null,
 				modelSelection: input.modelSelection ?? null,
+				runtimeMode: input.runtimeMode ?? null,
 				state: "starting",
 				desired: "running",
 				startedAt: now(),
@@ -15945,6 +15994,8 @@ async function createController({ directory, secrets, source, changed = () => {}
 					row.resumeRequested = true;
 				}
 				row.desired = action;
+				row.failures = 0;
+				row.nextAttemptAt = null;
 				row.confirmDelete = input.confirm === true;
 			} else throw new Error("Unknown action");
 			await save();
@@ -15981,7 +16032,7 @@ async function createController({ directory, secrets, source, changed = () => {}
 			} catch {}
 			const pending = [];
 			for (const row of state.rows) {
-				if (row.state === "stopped" && row.desired === "stopped" && !row.pinned && state.policy.deleteDays > 0 && now() >= row.stoppedAt + state.policy.deleteDays * 864e5) {
+				if (row.state === "stopped" && row.desired === "stopped" && !row.pinned && (state.policy.deleteOnThreadDelete && row.lastThreadDeleted || state.policy.deleteDays > 0 && now() >= row.stoppedAt + state.policy.deleteDays * 864e5)) {
 					if (row.retainedAt && (row.workSafe || row.rehomed)) {
 						row.desired = "deleted";
 						row.autoDeleteSafe = true;
@@ -15989,6 +16040,7 @@ async function createController({ directory, secrets, source, changed = () => {}
 					} else row.error = "Automatic deletion blocked: work has not been verified as retained or pushed.";
 				}
 				if (row.state === "deleted" || row.state === "stopped" && row.desired === "stopped") continue;
+				if (row.nextAttemptAt > now()) continue;
 				let worker = workers.get(row.id);
 				if (!worker) {
 					worker = reconcile(row).finally(() => workers.delete(row.id));
@@ -16004,6 +16056,70 @@ async function createController({ directory, secrets, source, changed = () => {}
 			await saveTail;
 			closed = true;
 		}
+	};
+}
+// src/launch.mjs
+async function launchProject(input) {
+	if (typeof input.projectDirectory !== "string" || !isAbsolute(input.projectDirectory)) throw new Error("Select a Git project on the controller first.");
+	const directory = await realpath(input.projectDirectory);
+	const repository = await command("git", [
+		"-C",
+		directory,
+		"remote",
+		"get-url",
+		"origin"
+	]);
+	if (repository.startsWith("https://")) {
+		const url = new URL(repository);
+		if (url.username || url.password) throw new Error("Use a Git remote without embedded credentials.");
+	}
+	const base = typeof input.base === "string" && input.base ? input.base : await command("git", [
+		"-C",
+		directory,
+		"rev-parse",
+		"--verify",
+		"HEAD"
+	]);
+	if (!/^[a-f0-9]{40}$/.test(base)) throw new Error("Select a full pushed commit SHA.");
+	return {
+		directory,
+		repository,
+		base
+	};
+}
+async function validatePushedProject(project) {
+	await command("git", [
+		"-C",
+		project.directory,
+		"fetch",
+		"origin"
+	]);
+	if (!await command("git", [
+		"-C",
+		project.directory,
+		"for-each-ref",
+		"--contains",
+		project.base,
+		"--format=%(refname)",
+		"refs/remotes/origin"
+	])) throw new Error("Push this base commit before starting a sandbox.");
+}
+async function launchSandbox(controller, input) {
+	if (!/^[a-f0-9-]{36}$/.test(input.requestId ?? "")) throw new Error("Invalid launch request id");
+	if (!controller.snapshot().rows.some((row) => row.id === input.requestId)) {
+		if (input.hasAttachments) throw new Error("Use a text-only first message.");
+		const project = await launchProject(input);
+		await validatePushedProject(project);
+		const modelSelection = typeof input.modelSelection === "string" && input.modelSelection ? JSON.parse(input.modelSelection) : input.modelSelection;
+		await controller.create({
+			...input,
+			...project,
+			modelSelection
+		});
+	}
+	return {
+		$t3: "environment-launch",
+		requestId: input.requestId
 	};
 }
 // src/plugin.mjs
@@ -16133,7 +16249,7 @@ function settings(controller) {
 				field("title", "Thread title"),
 				field("message", "First message (optional)")
 			]),
-			form("policy", "Save cost policy", "policy", Object.entries(state.policy).map(([key, value]) => field(key, key, "number", value))),
+			form("policy", "Save cost policy", "policy", Object.entries(state.policy).map(([key, value]) => field(key, key, typeof value === "boolean" ? "boolean" : "number", value))),
 			form("adopt", "Adopt an orphaned sandbox", "adopt", [
 				field("id", "Orphan sandbox ID"),
 				field("repository", "Git remote"),
@@ -16323,6 +16439,8 @@ var plugin_default = {
 			}),
 			changes: fromPubSub(changes),
 			commands: [
+				descriptor("launch", "Start a sandboxed project thread", (input) => mutate(() => launchSandbox(controller, input))),
+				descriptor("cancel", "Cancel provisioning and delete sandbox", (input) => mutate(() => controller.action(input.id, "deleted", { confirm: true }))),
 				descriptor("profile", "Configure provider profile", (input) => controller.configure(input)),
 				descriptor("adopt", "Adopt orphaned sandbox", (input) => controller.adopt(input)),
 				descriptor("policy", "Configure sandbox policy", (input) => controller.setPolicy(input)),
@@ -16350,6 +16468,96 @@ var plugin_default = {
 				}))
 			],
 			views: [
+				{
+					id: "launcher",
+					title: "New sandbox",
+					location: "environment-launcher",
+					permission: "environment:maintain",
+					read: (input = {}) => call("launcher", async () => {
+						const state = controller.snapshot();
+						const row = state.rows.find((row) => row.id === input.requestId);
+						if (row) return {
+							title: "New sandbox",
+							blocks: [{
+								id: "progress",
+								kind: "text",
+								text: row.error ?? `${row.state}: ${row.stage ?? row.title}`
+							}, {
+								id: "control",
+								kind: "actions",
+								actions: row.state === "starting" ? [action("cancel", "Cancel provisioning and delete sandbox", "cancel", { id: row.id })] : row.state === "error" ? [action("retry", "Retry", "state", {
+									id: row.id,
+									state: "running"
+								})] : []
+							}]
+						};
+						if (!state.profiles.length) return {
+							title: "New sandbox",
+							blocks: [{
+								id: "configure",
+								kind: "text",
+								text: "Configure a provider profile in Settings → Extensions → Sandboxes first."
+							}]
+						};
+						if (input.hasAttachments) return {
+							title: "New sandbox",
+							blocks: [{
+								id: "attachments",
+								kind: "text",
+								text: "Start with a text-only first message. Remove draft attachments and local context before choosing New sandbox."
+							}]
+						};
+						const project = await launchProject(input);
+						return {
+							title: "New sandbox",
+							blocks: [{
+								id: "scope",
+								kind: "text",
+								text: "The controller starts this thread from a pushed commit. Uncommitted local work stays here. After Send, provisioning continues if you lock your phone."
+							}, form("launch", "Send and start sandbox", "launch", [
+								{
+									name: "profile",
+									label: "Provider profile",
+									kind: "select",
+									required: true,
+									value: state.profiles[0].id,
+									options: state.profiles.map((p) => ({
+										label: p.id,
+										value: p.id
+									}))
+								},
+								field("title", "Thread title", "text", String(input.title ?? "Sandbox")),
+								field("base", "Pushed base commit", "text", project.base),
+								field("message", "First message", "text", String(input.message ?? ""))
+							], {
+								projectDirectory: project.directory,
+								requestId: input.requestId,
+								modelSelection: input.modelSelection ?? null,
+								runtimeMode: input.runtimeMode ?? null
+							})]
+						};
+					})
+				},
+				{
+					id: "environments",
+					title: "Managed sandbox environments",
+					location: "managed-environments",
+					permission: "environment:maintain",
+					read: () => succeed$1({
+						title: "Managed sandbox environments",
+						blocks: controller.snapshot().rows.filter((row) => row.environmentId && row.url).slice(-100).map((row) => ({
+							id: row.id.replace(/^[0-9]/, "s$&"),
+							kind: "environment",
+							environmentId: row.environmentId,
+							label: row.title ?? row.profile,
+							url: row.url,
+							state: row.state,
+							...row.threadId ? { threadId: row.threadId } : {},
+							launchRequestId: row.id,
+							connect: action("connect", "Connect", "pair", { id: row.id })
+						}))
+					})
+				},
 				{
 					id: "managed-status",
 					title: "Managed sandboxes",

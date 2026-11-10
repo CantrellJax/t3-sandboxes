@@ -15,7 +15,11 @@ async function fixture(t) {
     stops = 0,
     removes = 0;
   let failExport = false,
-    failCreate = false;
+    failCreate = false,
+    failLaunch = false;
+  const launches = new Map();
+  let failBootstrap = false,
+    safeWork = false;
   let activity = { active: true, waiting: false, closed: false, lastActivity: time };
   const d = {
     capabilities: { deadline: true, stopKeepsDisk: true },
@@ -44,7 +48,10 @@ async function fixture(t) {
     },
     setDeadline: async () => {},
     write: async () => {},
-    exec: async () => "token",
+    exec: async (_ref, script) => {
+      if (failBootstrap) throw new Error("Bootstrap unavailable");
+      return script.startsWith("node -e ") && safeWork ? "safe" : "token";
+    },
     expose: async () => "https://example.test",
   };
   const g = {
@@ -53,12 +60,17 @@ async function fixture(t) {
       if (failExport) throw new Error("offline");
       return { items: ["complete history"] };
     },
-    call: async (name) =>
-      name === "t3_project_list"
-        ? { projects: [] }
-        : name === "t3_project_create"
-          ? { id: "project" }
-          : { threadId: "thread" },
+    call: async (name, input) => {
+      if (name === "t3_thread_launch") {
+        launches.set(input.clientRequestId, input);
+        if (failLaunch) {
+          failLaunch = false;
+          throw new Error("Lost launch response");
+        }
+        return { threadId: "thread" };
+      }
+      return name === "t3_project_list" ? { projects: [] } : { id: "project" };
+    },
     activity: async () => activity,
   };
   const options = {
@@ -88,7 +100,17 @@ async function fixture(t) {
     get c() {
       return controller;
     },
-    create: () => controller.create(spec),
+    create: (input = {}) => controller.create({ ...spec, ...input }),
+    launches,
+    failBootstrap: () => {
+      failBootstrap = true;
+    },
+    safeWork: () => {
+      safeWork = true;
+    },
+    failLaunch: () => {
+      failLaunch = true;
+    },
     tick: () => controller.tick(),
     row: () => controller.snapshot().rows[0],
     counts: () => ({ creates, stops, removes }),
@@ -120,6 +142,7 @@ test("idempotent provisioning survives an uncertain reply and controller restart
   assert.equal(f.counts().creates, 1);
   await f.restart();
   assert.equal(await f.create(), id);
+  f.advance(30000);
   await f.tick();
   assert.equal(f.row().state, "running");
   assert.equal(f.counts().creates, 1);
@@ -219,4 +242,72 @@ test("a provider resource deleted externally is recorded as deleted without crea
   await f.tick();
   assert.equal(f.row().state, "deleted");
   assert.equal(f.counts().creates, 1);
+});
+
+test("a durable first send survives a lost guest reply and a controller restart", async (t) => {
+  const f = await fixture(t);
+  f.failLaunch();
+  await f.create({
+    message: "Implement this",
+    modelSelection: { instanceId: "codex", model: "test" },
+    runtimeMode: "full-access",
+  });
+  await f.tick();
+  assert.equal(f.row().state, "error");
+  await f.restart();
+  f.advance(30000);
+  await f.tick();
+  assert.equal(f.row().state, "running");
+  assert.equal(f.launches.size, 1);
+  const launch = f.launches.get(f.spec.requestId);
+  assert.equal(launch.message, "Implement this");
+  assert.equal(launch.runtimeMode, "full-access");
+  assert.equal(launch.workspaceStrategy.type, "worktree");
+  assert.equal(launch.workspaceStrategy.baseRef, f.spec.base);
+});
+test("deleting the last thread stops the sandbox and applies the same safe-delete guard", async (t) => {
+  const f = await fixture(t);
+  await f.create();
+  await f.tick();
+  f.setActivity({ active: false, waiting: false, closed: true, lastActivity: 0, threads: [] });
+  await f.tick();
+  assert.equal(f.row().state, "stopped");
+  await f.tick();
+  assert.equal(f.row().state, "stopped");
+  assert.match(f.row().error, /deletion blocked/);
+});
+
+test("provisioning backs off and stops after five failed attempts", async (t) => {
+  const f = await fixture(t);
+  f.failBootstrap();
+  await f.create();
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await f.tick();
+    const failures = f.row().failures;
+    await f.tick();
+    assert.equal(f.row().failures, failures);
+    f.advance(900000);
+  }
+  assert.equal(f.row().desired, "stopped");
+  f.advance(900000);
+  await f.tick();
+  assert.equal(f.row().state, "stopped");
+  assert.equal(f.counts().creates, 1);
+  assert.equal(f.counts().stops, 1);
+});
+test("last-thread deletion respects pin and deletes only after verified retention", async (t) => {
+  const f = await fixture(t);
+  f.safeWork();
+  const id = await f.create();
+  await f.tick();
+  await f.c.action(id, "pin", { pinned: true });
+  f.setActivity({ active: false, waiting: false, closed: true, lastActivity: 0, threads: [] });
+  await f.tick();
+  await f.tick();
+  assert.equal(f.row().state, "stopped");
+  assert.equal(f.counts().removes, 0);
+  await f.c.action(id, "pin", { pinned: false });
+  await f.tick();
+  assert.equal(f.row().state, "deleted");
+  assert.equal(f.counts().removes, 1);
 });

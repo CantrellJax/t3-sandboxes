@@ -47,19 +47,13 @@ export class Guest {
     );
   }
   async threads() {
-    const all = [];
-    let cursor;
-    do {
-      const page = await this.call("t3_thread_list", {
-        limit: 100,
-        allProjects: true,
-        includeSubagents: true,
-        ...(cursor === undefined ? {} : { cursor }),
-      });
-      all.push(...page.threads);
-      cursor = page.nextCursor;
-    } while (cursor !== null && cursor !== undefined);
-    return all;
+    const activity = await this.activity();
+    if (!Array.isArray(activity.threads))
+      throw new Error("Guest host does not supply the complete thread roster");
+    return activity.threads.map((thread) => ({
+      threadId: thread.threadId,
+      relationshipToParent: thread.subagent ? "subagent" : null,
+    }));
   }
   async activity() {
     return this.call("t3_plugin_read", {
