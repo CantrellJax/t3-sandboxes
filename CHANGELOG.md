@@ -1,4 +1,10 @@
 
+0.1.1
+=============
+2026-11-10
+
+* fix: execute workspace safety checks from the packaged plugin (9073e2c3)
+
 0.1.0
 =============
 2026-11-10

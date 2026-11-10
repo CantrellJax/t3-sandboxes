@@ -1,8 +1,7 @@
 export function workspaceSafetyScript(directory) {
-  return `(${inspect.toString()})(${JSON.stringify(directory)})`;
+  return `(${inspect.toString()})(${JSON.stringify(directory)}, require("node:child_process").execFileSync)`;
 }
-function inspect(directory) {
-  const { execFileSync: run } = require("node:child_process");
+function inspect(directory, run) {
   const git = (path, args) =>
     run("git", ["-C", path, ...args], {
       encoding: "utf8",

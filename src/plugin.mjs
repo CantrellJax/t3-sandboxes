@@ -165,7 +165,7 @@ export default {
   apiVersion: 1,
   id: "sandboxes",
   name: "Sandboxes",
-  version: "0.1.0",
+  version: "0.1.1",
   description: "On-demand thread environments with bounded leases and retained history.",
   activate: (context) =>
     Effect.gen(function* () {

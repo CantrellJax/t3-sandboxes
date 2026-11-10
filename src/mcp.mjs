@@ -36,7 +36,7 @@ export class Guest {
       await this.rpc("initialize", {
         protocolVersion: "2025-03-26",
         capabilities: {},
-        clientInfo: { name: "t3-sandboxes", version: "0.1.0" },
+        clientInfo: { name: "t3-sandboxes", version: "0.1.1" },
       });
       this.initialized = true;
     }

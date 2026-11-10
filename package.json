@@ -1,9 +1,15 @@
 {
   "name": "@digitalxero/t3-sandboxes",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
-  "type": "module",
   "license": "MIT",
+  "files": [
+    "dist/plugin.mjs",
+    "t3-plugin.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "type": "module",
   "scripts": {
     "build": "vp pack",
     "test": "node --test test/*.test.mjs"
@@ -16,11 +22,5 @@
   },
   "engines": {
     "node": ">=24.10"
-  },
-  "files": [
-    "dist/plugin.mjs",
-    "t3-plugin.json",
-    "README.md",
-    "LICENSE"
-  ]
+  }
 }

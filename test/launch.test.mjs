@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { workspaceSafetyScript } from "../src/safety.mjs";
+import { pathToFileURL } from "node:url";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
 import { command } from "../src/io.mjs";
 import { launchProject, validatePushedProject, launchSandbox } from "../src/launch.mjs";
 
@@ -23,7 +26,13 @@ test("only commits reachable from a fetched remote branch can launch; local edit
   await git(["push", "origin", "HEAD:main"]);
   const project = await launchProject({ projectDirectory: local });
   await validatePushedProject(project);
-  const safe = () => command(process.execPath, ["-e", workspaceSafetyScript(local)]);
+  const built = join(directory, "bundle");
+  await command("node_modules/.bin/vp", ["pack", "src/safety.mjs", "--out-dir", built]);
+  const { workspaceSafetyScript } = await import(pathToFileURL(join(built, "safety.mjs")));
+  const safe = async () =>
+    (
+      await promisify(execFile)(process.execPath, ["-e", workspaceSafetyScript(local)])
+    ).stdout.trim();
   assert.equal(await safe(), "safe");
   const worktree = join(directory, "other workspace");
   await git(["worktree", "add", "-b", "feature", worktree, project.base]);

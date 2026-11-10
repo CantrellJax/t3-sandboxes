@@ -1,4 +1,3 @@
-import { createRequire } from "node:module";
 import { cp, mkdir, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { watch } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
@@ -6,8 +5,6 @@ import { fileURLToPath } from "node:url";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-// \0rolldown/runtime.js
-var __require = /* #__PURE__ */ (() => createRequire(import.meta.url))();
 // node_modules/effect/dist/Pipeable.js
 /**
 * The `Pipeable` module defines the shared interface and implementation helpers
@@ -15403,7 +15400,7 @@ var Guest = class {
 				capabilities: {},
 				clientInfo: {
 					name: "t3-sandboxes",
-					version: "0.1.0"
+					version: "0.1.1"
 				}
 			});
 			this.initialized = true;
@@ -15547,10 +15544,9 @@ function usage(rows, profiles, now) {
 }
 // src/safety.mjs
 function workspaceSafetyScript(directory) {
-	return `(${inspect.toString()})(${JSON.stringify(directory)})`;
+	return `(${inspect.toString()})(${JSON.stringify(directory)}, require("node:child_process").execFileSync)`;
 }
-function inspect(directory) {
-	const { execFileSync: run } = __require("node:child_process");
+function inspect(directory, run) {
 	const git = (path, args) => run("git", [
 		"-C",
 		path,
@@ -16275,7 +16271,7 @@ var plugin_default = {
 	apiVersion: 1,
 	id: "sandboxes",
 	name: "Sandboxes",
-	version: "0.1.0",
+	version: "0.1.1",
 	description: "On-demand thread environments with bounded leases and retained history.",
 	activate: (context) => gen(function* () {
 		const changes = yield* unbounded();

@@ -1,3 +1,24 @@
+- semver: 0.1.1
+  date: 2026-11-10T08:37:11.743130462-08:00
+  packager: DigitalXero
+  changes:
+    - commit: 9073e2c3d94ac2e423edad6deb0ec838001f93f0
+      note: 'fix: execute workspace safety checks from the packaged plugin'
+      author:
+        name: Dj Gilcrease
+        email: digitalxero@gmail.com
+      committer:
+        name: Dj Gilcrease
+        email: digitalxero@gmail.com
+      conventional_commit:
+        category: fix
+        scope: ""
+        description: execute workspace safety checks from the packaged plugin
+        body: ""
+        footer: []
+        major: false
+        minor: false
+        patch: true
 - semver: 0.1.0
   date: 2026-11-10T08:10:01.873530924-08:00
   packager: DigitalXero
