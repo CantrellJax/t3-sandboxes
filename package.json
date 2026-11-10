@@ -1,1 +1,26 @@
-{"name":"@digitalxero/t3-sandboxes","version":"0.1.0","private":true,"type":"module","license":"MIT","scripts":{"build":"vp pack","test":"node --test test/*.test.mjs"},"dependencies":{"effect":"4.1.2"},"devDependencies":{"vite-plus":"1.4.0"}}
+{
+  "name": "@digitalxero/t3-sandboxes",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "build": "vp pack",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "effect": "4.1.2"
+  },
+  "devDependencies": {
+    "vite-plus": "1.4.0"
+  },
+  "engines": {
+    "node": ">=24.10"
+  },
+  "files": [
+    "dist/plugin.mjs",
+    "t3-plugin.json",
+    "README.md",
+    "LICENSE"
+  ]
+}
