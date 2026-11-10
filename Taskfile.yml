@@ -1,4 +1,4 @@
-version: '3'
+version: "3"
 tasks:
   build:
     cmds: [npm run build]
@@ -6,3 +6,11 @@ tasks:
     cmds: [npm test]
   verify:
     cmds: [npm test, npm run build, node scripts/verify.mjs]
+  policy:
+    cmds: [python3 .repo-policy/check.py]
+  release:next:
+    cmds: [python3 .repo-policy/release.py next]
+  release:changelog:
+    cmds: [python3 .repo-policy/release.py changelog]
+  release:tag:
+    cmds: [python3 .repo-policy/release.py tag]

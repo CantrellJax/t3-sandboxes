@@ -1,0 +1,106 @@
+- semver: 0.1.0
+  date: 2026-11-10T08:10:01.873530924-08:00
+  packager: DigitalXero
+  changes:
+    - commit: 1becb8aa00201b0f55b35e62ff6e526ee1162237
+      note: 'feat: launch sandbox threads from every client and advertise connections'
+      author:
+        name: Dj Gilcrease
+        email: digitalxero@gmail.com
+      committer:
+        name: Dj Gilcrease
+        email: digitalxero@gmail.com
+      conventional_commit:
+        category: feat
+        scope: ""
+        description: launch sandbox threads from every client and advertise connections
+        body: ""
+        footer: []
+        major: false
+        minor: true
+        patch: false
+    - commit: 8563b677a040b3fc31f6cde9808ae5d6eedd7f86
+      note: 'build: include installable sandbox plugin bundle'
+      author:
+        name: Dj Gilcrease
+        email: digitalxero@gmail.com
+      committer:
+        name: Dj Gilcrease
+        email: digitalxero@gmail.com
+      conventional_commit:
+        category: build
+        scope: ""
+        description: include installable sandbox plugin bundle
+        body: ""
+        footer: []
+        major: false
+        minor: false
+        patch: false
+    - commit: d86dbdbc9486799eb0d88e4c2e75b5560893b50a
+      note: 'fix: reconcile externally deleted sandboxes without recreating them'
+      author:
+        name: Dj Gilcrease
+        email: digitalxero@gmail.com
+      committer:
+        name: Dj Gilcrease
+        email: digitalxero@gmail.com
+      conventional_commit:
+        category: fix
+        scope: ""
+        description: reconcile externally deleted sandboxes without recreating them
+        body: ""
+        footer: []
+        major: false
+        minor: false
+        patch: true
+    - commit: 23d9f92495edc5f34d4bc77256ed6cb92716fe84
+      note: 'test: report asynchronous Boat snapshot verification accurately'
+      author:
+        name: Dj Gilcrease
+        email: digitalxero@gmail.com
+      committer:
+        name: Dj Gilcrease
+        email: digitalxero@gmail.com
+      conventional_commit:
+        category: test
+        scope: ""
+        description: report asynchronous Boat snapshot verification accurately
+        body: ""
+        footer: []
+        major: false
+        minor: false
+        patch: true
+    - commit: 4dddc43e054b0761c748d7bfcadc53db25bedf7c
+      note: 'docs: pin verified shared host and explain removal guard'
+      author:
+        name: Dj Gilcrease
+        email: digitalxero@gmail.com
+      committer:
+        name: Dj Gilcrease
+        email: digitalxero@gmail.com
+      conventional_commit:
+        category: docs
+        scope: ""
+        description: pin verified shared host and explain removal guard
+        body: ""
+        footer: []
+        major: false
+        minor: false
+        patch: true
+    - commit: 85c810820468d6df92150a5c7c77b79ac5c802c0
+      note: 'feat: add sandbox environments plugin with bounded lifecycle policies'
+      author:
+        name: Dj Gilcrease
+        email: digitalxero@gmail.com
+      committer:
+        name: Dj Gilcrease
+        email: digitalxero@gmail.com
+      conventional_commit:
+        category: feat
+        scope: ""
+        description: add sandbox environments plugin with bounded lifecycle policies
+        body: ""
+        footer: []
+        major: false
+        minor: true
+        patch: false
