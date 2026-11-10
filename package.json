@@ -1,0 +1,1 @@
+{"name":"@digitalxero/t3-sandboxes","version":"0.1.0","private":true,"type":"module","license":"MIT","scripts":{"build":"vp pack","test":"node --test test/*.test.mjs"},"dependencies":{"effect":"4.1.2"},"devDependencies":{"vite-plus":"1.4.0"}}

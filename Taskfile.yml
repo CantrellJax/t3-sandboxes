@@ -1,0 +1,8 @@
+version: '3'
+tasks:
+  build:
+    cmds: [npm run build]
+  test:
+    cmds: [npm test]
+  verify:
+    cmds: [npm test, npm run build, node scripts/verify.mjs]
