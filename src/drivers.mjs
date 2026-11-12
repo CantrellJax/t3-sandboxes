@@ -196,6 +196,7 @@ function external(profile, run) {
         "expose",
         "create",
         "write",
+        "quote",
       ].map((op) => [op, (...args) => call(op, args)]),
     ),
   };

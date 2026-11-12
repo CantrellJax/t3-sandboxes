@@ -523,7 +523,7 @@ function isString$1(input) {
 * @category guards
 * @since 2.0.0
 */
-function isNumber(input) {
+function isNumber$1(input) {
 	return typeof input === "number";
 }
 /**
@@ -3520,7 +3520,7 @@ const fromInputUnsafe = (input) => {
 			if (input === null) break;
 			if (TypeId$20 in input) return input;
 			if (Array.isArray(input)) {
-				if (input.length !== 2 || !input.every(isNumber)) return invalid$1(input);
+				if (input.length !== 2 || !input.every(isNumber$1)) return invalid$1(input);
 				if (Number.isNaN(input[0]) || Number.isNaN(input[1])) return zero$1;
 				if (input[0] === -Infinity || input[1] === -Infinity) return negativeInfinity;
 				if (input[0] === Infinity || input[1] === Infinity) return infinity;
@@ -10481,7 +10481,7 @@ const Number$2 = class extends ASTNodeImpl {
 	_tag = "Number";
 	/** @internal */
 	getParser() {
-		return fromRefinement(this, isNumber);
+		return fromRefinement(this, isNumber$1);
 	}
 	/** @internal */
 	matchKey(s, options) {
@@ -15313,7 +15313,8 @@ function external(profile, run) {
 			"exec",
 			"expose",
 			"create",
-			"write"
+			"write",
+			"quote"
 		].map((op) => [op, (...args) => call(op, args)]))
 	};
 }
@@ -15514,6 +15515,68 @@ function tone(state) {
 		"deleting"
 	].includes(state) ? "warning" : "danger";
 }
+// src/pricing.mjs
+const CURRENCIES = ["USD"];
+const UNITS = {
+	second: 1,
+	minute: 60,
+	hour: 3600
+};
+const ROUNDING = ["none", "up"];
+const DEFAULT_VALIDITY_MS = 9e5;
+const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+const MAX_RATE = 1e3;
+const isNumber = (value) => typeof value === "number" && Number.isFinite(value);
+function readQuote(raw, choice, now) {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Quote missing");
+	if (!CURRENCIES.includes(raw.currency)) throw new Error("Unsupported quote currency");
+	if (!Object.hasOwn(UNITS, raw.unit)) throw new Error("Unsupported quote billing unit");
+	if (!ROUNDING.includes(raw.rounding)) throw new Error("Unsupported quote rounding");
+	let validUntil = now + DEFAULT_VALIDITY_MS;
+	if (raw.validUntil !== void 0) {
+		const text = typeof raw.validUntil === "string" ? raw.validUntil : "";
+		validUntil = ISO_UTC.test(text) ? Date.parse(text) : NaN;
+		if (!Number.isFinite(validUntil) || new Date(validUntil).toISOString().slice(0, 19) !== text.slice(0, 19)) throw new Error("Quote validUntil is not an ISO 8601 UTC timestamp");
+	}
+	if (!(validUntil > now)) throw new Error("Quote expired");
+	if (validUntil > now + 864e5) throw new Error("Quote validUntil is more than 24 hours ahead");
+	if (!Array.isArray(raw.choices) || !raw.choices.length || raw.choices.length > 50) throw new Error("Quote has no resource choices");
+	const choices = raw.choices.map((item) => {
+		if (!item || typeof item !== "object" || typeof item.id !== "string") throw new Error("Quote choice is not usable");
+		if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(item.id)) throw new Error("Quote choice id is not usable");
+		if (!isNumber(item.rate) || item.rate < 0 || item.rate > MAX_RATE) throw new Error("Quote rate is not usable");
+		if (item.label !== void 0 && typeof item.label !== "string") throw new Error("Quote choice label is not usable");
+		return {
+			id: item.id,
+			label: (item.label ?? item.id).slice(0, 80),
+			rate: item.rate
+		};
+	});
+	if (new Set(choices.map((item) => item.id)).size !== choices.length) throw new Error("Quote choice ids repeat");
+	const selected = choice ? choices.find((item) => item.id === choice) : choices[0];
+	if (!selected) throw new Error(`Quote has no resource choice ${choice}`);
+	return {
+		source: "provider",
+		currency: raw.currency,
+		unit: raw.unit,
+		rounding: raw.rounding,
+		choice: selected.id,
+		label: selected.label,
+		rate: selected.rate,
+		quotedAt: now,
+		validUntil,
+		choices
+	};
+}
+function snapshot(quote) {
+	const { choices: _choices, ...price } = quote;
+	return price;
+}
+function chargeFor(price, seconds) {
+	if (!(seconds > 0)) return 0;
+	const units = seconds / UNITS[price.unit];
+	return (price.rounding === "up" ? Math.ceil(units) : units) * price.rate;
+}
 // src/billing.mjs
 function usage(rows, profiles, now) {
 	const monthStart = new Date(now);
@@ -15526,15 +15589,28 @@ function usage(rows, profiles, now) {
 			start: row.startedAt,
 			end: row.stoppedAt ?? null
 		}];
-		const seconds = spans.reduce((total, span) => total + Math.max(0, (span.end ?? (row.enforcedDeadline ? Math.min(now, row.deadline ?? now) : now)) - span.start) / 1e3, 0);
-		const monthSeconds = spans.reduce((total, span) => total + Math.max(0, (span.end ?? (row.enforcedDeadline ? Math.min(now, row.deadline ?? now) : now)) - Math.max(start, span.start)) / 1e3, 0);
+		const end = (span) => span.end ?? (row.enforcedDeadline ? Math.min(now, row.deadline ?? now) : now);
+		const charge = (span, seconds) => {
+			const price = span.price ?? row.price;
+			return price ? chargeFor(price, seconds) : seconds * rate / 3600;
+		};
+		let seconds = 0, cost = 0, monthCost = 0;
+		for (const span of spans) for (let from = span.start, stop = end(span); from < stop;) {
+			const date = new Date(from);
+			const to = Math.min(stop, Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1));
+			const part = charge(span, (to - from) / 1e3);
+			seconds += (to - from) / 1e3;
+			cost += part;
+			if (from >= start) monthCost += part;
+			from = to;
+		}
 		return {
 			id: row.id,
 			title: row.title,
 			seconds,
-			cost: seconds * rate / 3600,
-			monthCost: monthSeconds * rate / 3600,
-			rateKnown: rate > 0
+			cost,
+			monthCost,
+			rateKnown: Boolean(row.price || spans.some((span) => span.price)) || rate > 0
 		};
 	});
 	return {
@@ -15631,6 +15707,57 @@ async function createController({ directory, secrets, source, changed = () => {}
 			token: await secrets.get(`provider-${p.id}`)
 		});
 	};
+	async function freshQuote(p, token, choice = p.choice) {
+		try {
+			const d = drivers({
+				...p,
+				token: token || await secrets.get(`provider-${p.id}`)
+			});
+			if (typeof d.quote !== "function") throw new Error("Driver does not support quotes");
+			const quote = readQuote(await d.quote(), choice, now());
+			p.quote = quote;
+			delete p.quoteError;
+			return quote;
+		} catch (cause) {
+			p.quoteError = {
+				message: String(cause?.message ?? cause).slice(0, 200),
+				at: now()
+			};
+			await save();
+			return null;
+		}
+	}
+	const terms = (price) => `${price.currency} per ${price.unit}, rounding ${price.rounding}`;
+	async function validPrice(p, row, price) {
+		if (p.pricing !== "provider") return { price: null };
+		if (price && price.validUntil > now()) return { price };
+		const quote = await freshQuote(p, void 0, row.choice);
+		if (!quote) return { error: `provider quote failed: ${p.quoteError.message}` };
+		if (price && terms(quote) !== terms(price)) return { error: `the provider billing terms changed from ${terms(price)} to ${terms(quote)}; request again to accept them` };
+		if (price && quote.rate > price.rate) return { error: `the provider price rose from ${price.rate} to ${quote.rate} ${quote.currency} per ${quote.unit}; request again to accept it` };
+		if (state.policy.monthlyBudget > 0 && usage(state.rows, state.profiles, now()).monthCost >= state.policy.monthlyBudget) return { error: "monthly estimated budget reached" };
+		return { price: snapshot(quote) };
+	}
+	function closeSession(row, at = now()) {
+		const last = row.sessions?.at(-1);
+		if (last && last.end == null) last.end = at;
+	}
+	function openSession(row) {
+		const at = row.startRequestedAt ?? now();
+		closeSession(row, at);
+		(row.sessions ??= []).push({
+			start: at,
+			end: null,
+			...row.nextPrice ? { price: row.nextPrice } : {}
+		});
+		row.resumeRequested = false;
+		delete row.nextPrice;
+		delete row.startRequestedAt;
+		row.startedAt = at;
+		row.lastActivity = now();
+		row.bootstrapped = false;
+		row.deadline = null;
+	}
 	const getGuest = async (row) => guest(row.url, await secrets.get(`guest-${row.id}`));
 	async function retain(row) {
 		const g = await getGuest(row);
@@ -15675,16 +15802,28 @@ async function createController({ directory, secrets, source, changed = () => {}
 				if (matches.length) row.ref = matches[0].ref;
 				else if (row.desired !== "running") {
 					row.state = "deleted";
+					row.sessions = [];
 					await save();
 					return;
 				} else {
 					if (row.createAttempted) throw new Error("Create outcome unknown; reconcile the provider before retrying");
+					const priced = await validPrice(p, row, row.price);
+					if (priced.error) {
+						row.desired = "deleted";
+						row.state = "deleted";
+						row.sessions = [];
+						row.error = `Create cancelled before provisioning: ${priced.error}`;
+						await save();
+						return;
+					}
+					if (priced.price) row.price = priced.price;
 					row.createAttempted = true;
 					await save();
 					const made = await d.create({
 						name: row.name,
 						requestId: row.id,
-						ttl: state.policy.unattendedMinutes * 60
+						ttl: state.policy.unattendedMinutes * 60,
+						...row.choice ? { choice: row.choice } : {}
 					});
 					if (!made.ref) throw new Error("Provider returned no resource id");
 					row.ref = made.ref;
@@ -15697,6 +15836,7 @@ async function createController({ directory, secrets, source, changed = () => {}
 				observed = await d.get(row.ref);
 			} catch (cause) {
 				if ((await d.list()).some((item) => item.ref === row.ref)) throw cause;
+				closeSession(row);
 				row.state = "deleted";
 				row.desired = "deleted";
 				await save();
@@ -15710,6 +15850,7 @@ async function createController({ directory, secrets, source, changed = () => {}
 				return;
 			}
 			if (observed.state === "deleted") {
+				closeSession(row);
 				row.state = "deleted";
 				row.desired = "deleted";
 				await save();
@@ -15725,7 +15866,13 @@ async function createController({ directory, secrets, source, changed = () => {}
 				await save();
 				return;
 			}
+			if (observed.state === "running" && (row.startRequestedAt || row.resumeRequested)) openSession(row);
+			if (observed.state === "stopped" && row.startRequestedAt) {
+				delete row.startRequestedAt;
+				if (!row.resumeRequested) delete row.nextPrice;
+			}
 			if (observed.state === "stopped" && row.desired === "stopped") {
+				closeSession(row, Math.min(now(), row.deadline ?? now()));
 				row.state = "stopped";
 				row.stoppedAt ??= now();
 				await save();
@@ -15743,16 +15890,21 @@ async function createController({ directory, secrets, source, changed = () => {}
 			if (row.desired === "running") {
 				row.stage = "Starting sandbox";
 				if (observed.state === "stopped") {
+					const priced = await validPrice(p, row, row.nextPrice);
+					if (priced.error) {
+						row.desired = "stopped";
+						row.resumeRequested = false;
+						row.state = "stopped";
+						delete row.nextPrice;
+						row.error = `Resume cancelled: ${priced.error}`;
+						await save();
+						return;
+					}
+					if (priced.price) row.nextPrice = priced.price;
+					row.startRequestedAt = now();
+					await save();
 					await d.start(row.ref);
-					row.resumeRequested = false;
-					row.startedAt = now();
-					(row.sessions ??= []).push({
-						start: now(),
-						end: null
-					});
-					row.lastActivity = now();
-					row.bootstrapped = false;
-					row.deadline = null;
+					openSession(row);
 				}
 				if (!row.bootstrapped) {
 					row.state = "starting";
@@ -15865,7 +16017,10 @@ async function createController({ directory, secrets, source, changed = () => {}
 		}
 	}
 	async function stop(row, d) {
-		if (row.state === "stopped") return;
+		if (row.state === "stopped") {
+			closeSession(row);
+			return;
+		}
 		row.state = "stopping";
 		await save();
 		if (row.threadId || row.bootstrapped) await retain(row);
@@ -15876,7 +16031,7 @@ async function createController({ directory, secrets, source, changed = () => {}
 			return;
 		}
 		row.stoppedAt = now();
-		if (row.sessions?.at(-1)) row.sessions.at(-1).end = now();
+		closeSession(row);
 		row.bootstrapped = false;
 		await save();
 	}
@@ -15893,6 +16048,8 @@ async function createController({ directory, secrets, source, changed = () => {}
 				"external"
 			].includes(input.driver)) throw new Error("Invalid driver");
 			if (input.driver !== "external" && (!input.image || typeof input.image !== "string")) throw new Error("Image or snapshot required");
+			const pricing = input.pricing === "provider" ? "provider" : void 0;
+			if (pricing && (input.driver !== "external" || !(input.endpoint || input.executable))) throw new Error("Provider quotes need an external driver endpoint or executable");
 			const p = {
 				id,
 				driver: input.driver,
@@ -15904,13 +16061,22 @@ async function createController({ directory, secrets, source, changed = () => {}
 				executable: input.executable || void 0,
 				endpoint: input.endpoint ? safeUrl(input.endpoint) : void 0,
 				rehomePath: input.rehomePath || void 0,
-				hourlyRate: Number(input.hourlyRate ?? 0),
+				hourlyRate: pricing ? 0 : Number(input.hourlyRate ?? 0),
+				...pricing ? {
+					pricing,
+					choice: input.choice || void 0
+				} : {},
 				capabilities: input.capabilities ?? {
 					deadline: false,
 					stopKeepsDisk: true
 				}
 			};
 			if (!Number.isFinite(p.hourlyRate) || p.hourlyRate < 0) throw new Error("Invalid hourly rate");
+			if (pricing) {
+				const quote = await freshQuote(p, input.token);
+				if (!quote) throw new Error(`Provider quote refused: ${p.quoteError.message}`);
+				p.choice = quote.choice;
+			}
 			state.profiles = state.profiles.filter((x) => x.id !== id).concat(p);
 			if (input.token) await secrets.set(`provider-${id}`, input.token);
 			await save();
@@ -15926,8 +16092,10 @@ async function createController({ directory, secrets, source, changed = () => {}
 			if (old) return old.id;
 			const p = profile(input.profile);
 			if (state.rows.filter((r) => r.desired === "running" && r.state !== "deleted").length >= state.policy.maxRunning) throw new Error("Running sandbox limit reached");
+			const quote = p.pricing === "provider" ? await freshQuote(p) : null;
+			if (p.pricing === "provider" && !quote) throw new Error(`Provider quote failed: ${p.quoteError.message}`);
 			if (state.policy.monthlyBudget > 0) {
-				if (!(p.hourlyRate > 0)) throw new Error("Configure an hourly rate before using a budget");
+				if (!quote && !(p.hourlyRate > 0)) throw new Error("Configure an hourly rate before using a budget");
 				if (usage(state.rows, state.profiles, now()).monthCost >= state.policy.monthlyBudget) throw new Error("Monthly estimated budget reached");
 			}
 			if (typeof input.repository !== "string" || !/^https:\/\/[^\s]+$|^git@[^\s]+:[^\s]+$/.test(input.repository)) throw new Error("Use a Git remote");
@@ -15938,6 +16106,8 @@ async function createController({ directory, secrets, source, changed = () => {}
 				profile: p.id,
 				title: String(input.title ?? "Sandbox").slice(0, 150),
 				hourlyRate: p.hourlyRate,
+				...quote ? { price: snapshot(quote) } : {},
+				...p.choice ? { choice: p.choice } : {},
 				repository: input.repository,
 				base: input.base,
 				message: input.message ?? null,
@@ -15982,12 +16152,19 @@ async function createController({ directory, secrets, source, changed = () => {}
 				"deleted"
 			].includes(action)) {
 				if (action === "deleted" && input.confirm !== true) throw new Error("Confirm permanent loss of workspace and thread data");
-				if (action === "running") {
-					if (row.state === "deleted") throw new Error("Deleted sandboxes cannot be resumed.");
+				if (action === "running" && row.state === "deleted") throw new Error("Deleted sandboxes cannot be resumed.");
+				if (action === "running" && !(row.desired === "running" && row.state !== "stopped")) {
 					if (state.rows.filter((r) => r.id !== row.id && r.desired === "running" && r.state !== "deleted").length >= state.policy.maxRunning) throw new Error("Running sandbox limit reached");
 					const p = profile(row.profile);
-					if (state.policy.monthlyBudget > 0 && (!(p.hourlyRate > 0) || usage(state.rows, state.profiles, now()).monthCost >= state.policy.monthlyBudget)) throw new Error("Monthly estimated budget reached or rate missing");
+					const quote = p.pricing === "provider" ? await freshQuote(p) : null;
+					if (p.pricing === "provider" && !quote) throw new Error(`Provider quote failed: ${p.quoteError.message}`);
+					if (state.policy.monthlyBudget > 0 && (!quote && !(p.hourlyRate > 0) || usage(state.rows, state.profiles, now()).monthCost >= state.policy.monthlyBudget)) throw new Error("Monthly estimated budget reached or rate missing");
+					if (quote) row.nextPrice = snapshot(quote);
 					row.resumeRequested = true;
+				}
+				if (action !== "running") {
+					row.resumeRequested = false;
+					if (!row.startRequestedAt) delete row.nextPrice;
 				}
 				row.desired = action;
 				row.failures = 0;
@@ -16158,6 +16335,22 @@ const descriptor = (id, title, run, { agent = false, permission = "environment:m
 	agent,
 	run: (input) => call(id, () => run(Object.fromEntries(Object.entries(input).map(([key, value]) => [key.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()), value]))))
 });
+const minutesAgo = (time, at) => `${Math.max(0, Math.round((time - at) / 6e4))} min ago`;
+function quoteRows(state, time = Date.now()) {
+	return state.profiles.filter((p) => p.pricing === "provider").map((p) => {
+		const q = p.quote;
+		return {
+			id: p.id,
+			cells: [
+				p.id,
+				q ? `${q.label}: ${q.rate} ${q.currency} per ${q.unit}${q.rounding === "up" ? ", each session rounded up" : ""}` : "No accepted quote",
+				q ? `Provider quote from ${minutesAgo(time, q.quotedAt)}, ${q.validUntil > time ? "valid" : "expired"}` : "None",
+				p.quoteError ? `Refresh failed ${minutesAgo(time, p.quoteError.at)}: ${p.quoteError.message}` : "Last refresh succeeded"
+			],
+			actions: []
+		};
+	});
+}
 function settings(controller) {
 	const state = controller.snapshot();
 	return {
@@ -16219,6 +16412,30 @@ function settings(controller) {
 						value
 					}))
 				},
+				{
+					name: "pricing",
+					label: "Price source",
+					kind: "select",
+					options: [{
+						label: "Typed hourly rate",
+						value: ""
+					}, {
+						label: "Provider quote (external driver)",
+						value: "provider"
+					}]
+				},
+				{
+					name: "choice",
+					label: "Resource choice from the provider quote",
+					kind: "select",
+					options: [{
+						label: "First choice the provider lists",
+						value: ""
+					}].concat(state.profiles.filter((p) => p.quote).flatMap((p) => p.quote.choices.map((c) => ({
+						label: `${p.id}: ${c.label} (${c.rate} ${p.quote.currency} per ${p.quote.unit})`,
+						value: c.id
+					}))))
+				},
 				field("image", "Docker image or Boat snapshot"),
 				field("environment", "Boat environment (blank injects no credentials)"),
 				field("url", "Tailnet URL override ({id} is replaced)"),
@@ -16226,7 +16443,7 @@ function settings(controller) {
 				field("t3Command", "T3 executable in image", "text", "t3"),
 				field("executable", "External driver executable"),
 				field("rehomePath", "Optional Rehome plugin path inside guest image"),
-				field("hourlyRate", "Hourly rate for estimated cost and budget", "number", 0),
+				field("hourlyRate", "Hourly rate for estimated cost and budget (typed rate only)", "number", 0),
 				field("endpoint", "External driver HTTPS endpoint"),
 				field("token", "External driver bearer key", "password")
 			]),
@@ -16592,28 +16809,42 @@ var plugin_default = {
 					permission: "orchestration:read",
 					read: () => succeed$1({
 						title: "Sandbox usage",
-						blocks: [{
-							id: "cost",
-							kind: "text",
-							text: `Estimated month total: $${controller.usage().monthCost.toFixed(2)}. Rates are configured per profile; provider invoices are authoritative.`
-						}, {
-							id: "resources",
-							kind: "table",
-							columns: [
-								"Thread",
-								"Runtime hours",
-								"Estimated cost"
-							],
-							rows: controller.usage().items.map((item) => ({
-								id: item.id,
-								cells: [
-									item.title ?? item.id,
-									(item.seconds / 3600).toFixed(2),
-									item.rateKnown ? "$" + item.cost.toFixed(2) : "Rate not configured"
+						blocks: [
+							{
+								id: "cost",
+								kind: "text",
+								text: `Estimated month total: $${controller.usage().monthCost.toFixed(2)}. Each sandbox keeps the typed rate or provider quote it was created with; provider invoices are authoritative.`
+							},
+							{
+								id: "quotes",
+								kind: "table",
+								columns: [
+									"Profile",
+									"Quoted price",
+									"Source",
+									"Refresh"
 								],
-								actions: []
-							}))
-						}]
+								rows: quoteRows(controller.snapshot())
+							},
+							{
+								id: "resources",
+								kind: "table",
+								columns: [
+									"Thread",
+									"Runtime hours",
+									"Estimated cost"
+								],
+								rows: controller.usage().items.map((item) => ({
+									id: item.id,
+									cells: [
+										item.title ?? item.id,
+										(item.seconds / 3600).toFixed(2),
+										item.rateKnown ? "$" + item.cost.toFixed(2) : "No rate or quote"
+									],
+									actions: []
+								}))
+							}
+						]
 					})
 				}
 			],

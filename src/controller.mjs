@@ -6,6 +6,7 @@ import { driver, bootstrap, pairingScript } from "./drivers.mjs";
 import { Guest } from "./mcp.mjs";
 import { policy, decide, deadline } from "./policy.mjs";
 import { usage } from "./billing.mjs";
+import { readQuote, snapshot } from "./pricing.mjs";
 import { workspaceSafetyScript } from "./safety.mjs";
 export async function createController({
   directory,
@@ -58,6 +59,71 @@ export async function createController({
     const p = profile(row.profile);
     return drivers({ ...p, token: await secrets.get(`provider-${p.id}`) });
   };
+  // Asks a quoted profile's driver for a fresh price. A failure is kept on the
+  // profile for display and returns null; callers decide whether that refuses.
+  async function freshQuote(p, token, choice = p.choice) {
+    try {
+      const d = drivers({ ...p, token: token || (await secrets.get(`provider-${p.id}`)) });
+      if (typeof d.quote !== "function") throw new Error("Driver does not support quotes");
+      const quote = readQuote(await d.quote(), choice, now());
+      p.quote = quote;
+      delete p.quoteError;
+      return quote;
+    } catch (cause) {
+      p.quoteError = { message: String(cause?.message ?? cause).slice(0, 200), at: now() };
+      await save();
+      return null;
+    }
+  }
+  // Worker-side invariant: a quoted profile never creates or starts a resource
+  // without an unexpired accepted price. An expired or missing snapshot is
+  // refreshed for the same choice. The refresh is used only on identical billing
+  // terms (currency, unit, rounding) at a per-unit rate no higher than accepted;
+  // a change in terms can raise the minimum charge, so it needs a new request.
+  // The caller cancels when the refresh fails or is not used, or the budget is reached.
+  const terms = (price) => `${price.currency} per ${price.unit}, rounding ${price.rounding}`;
+  async function validPrice(p, row, price) {
+    if (p.pricing !== "provider") return { price: null };
+    if (price && price.validUntil > now()) return { price };
+    const quote = await freshQuote(p, undefined, row.choice);
+    if (!quote) return { error: `provider quote failed: ${p.quoteError.message}` };
+    if (price && terms(quote) !== terms(price))
+      return {
+        error: `the provider billing terms changed from ${terms(price)} to ${terms(quote)}; request again to accept them`,
+      };
+    if (price && quote.rate > price.rate)
+      return {
+        error: `the provider price rose from ${price.rate} to ${quote.rate} ${quote.currency} per ${quote.unit}; request again to accept it`,
+      };
+    if (
+      state.policy.monthlyBudget > 0 &&
+      usage(state.rows, state.profiles, now()).monthCost >= state.policy.monthlyBudget
+    )
+      return { error: "monthly estimated budget reached" };
+    return { price: snapshot(quote) };
+  }
+  // Ends any open session, then opens one at the time start was requested with
+  // the accepted price, and clears the pending resume.
+  function closeSession(row, at = now()) {
+    const last = row.sessions?.at(-1);
+    if (last && last.end == null) last.end = at;
+  }
+  function openSession(row) {
+    const at = row.startRequestedAt ?? now();
+    closeSession(row, at);
+    (row.sessions ??= []).push({
+      start: at,
+      end: null,
+      ...(row.nextPrice ? { price: row.nextPrice } : {}),
+    });
+    row.resumeRequested = false;
+    delete row.nextPrice;
+    delete row.startRequestedAt;
+    row.startedAt = at;
+    row.lastActivity = now();
+    row.bootstrapped = false;
+    row.deadline = null;
+  }
   const getGuest = async (row) => guest(row.url, await secrets.get(`guest-${row.id}`));
   async function retain(row) {
     const g = await getGuest(row);
@@ -116,18 +182,31 @@ export async function createController({
         if (matches.length > 1) throw new Error("Duplicate provider resources require recovery");
         if (matches.length) row.ref = matches[0].ref;
         else if (row.desired !== "running") {
+          // Never provisioned: nothing ran, so nothing bills.
           row.state = "deleted";
+          row.sessions = [];
           await save();
           return;
         } else {
           if (row.createAttempted)
             throw new Error("Create outcome unknown; reconcile the provider before retrying");
+          const priced = await validPrice(p, row, row.price);
+          if (priced.error) {
+            row.desired = "deleted";
+            row.state = "deleted";
+            row.sessions = [];
+            row.error = `Create cancelled before provisioning: ${priced.error}`;
+            await save();
+            return;
+          }
+          if (priced.price) row.price = priced.price;
           row.createAttempted = true;
           await save();
           const made = await d.create({
             name: row.name,
             requestId: row.id,
             ttl: state.policy.unattendedMinutes * 60,
+            ...(row.choice ? { choice: row.choice } : {}),
           });
           if (!made.ref) throw new Error("Provider returned no resource id");
           row.ref = made.ref;
@@ -141,6 +220,7 @@ export async function createController({
       } catch (cause) {
         const inventory = await d.list();
         if (inventory.some((item) => item.ref === row.ref)) throw cause;
+        closeSession(row);
         row.state = "deleted";
         row.desired = "deleted";
         await save();
@@ -154,6 +234,7 @@ export async function createController({
         return;
       }
       if (observed.state === "deleted") {
+        closeSession(row);
         row.state = "deleted";
         row.desired = "deleted";
         await save();
@@ -169,7 +250,16 @@ export async function createController({
         await save();
         return;
       }
+      // A start whose reply was lost: the resource runs, so bill it from the request,
+      // whatever was asked since. A stopped resource means no pending start ran.
+      if (observed.state === "running" && (row.startRequestedAt || row.resumeRequested))
+        openSession(row);
+      if (observed.state === "stopped" && row.startRequestedAt) {
+        delete row.startRequestedAt;
+        if (!row.resumeRequested) delete row.nextPrice;
+      }
       if (observed.state === "stopped" && row.desired === "stopped") {
+        closeSession(row, Math.min(now(), row.deadline ?? now()));
         row.state = "stopped";
         row.stoppedAt ??= now();
         await save();
@@ -183,13 +273,21 @@ export async function createController({
       if (row.desired === "running") {
         row.stage = "Starting sandbox";
         if (observed.state === "stopped") {
+          const priced = await validPrice(p, row, row.nextPrice);
+          if (priced.error) {
+            row.desired = "stopped";
+            row.resumeRequested = false;
+            row.state = "stopped";
+            delete row.nextPrice;
+            row.error = `Resume cancelled: ${priced.error}`;
+            await save();
+            return;
+          }
+          if (priced.price) row.nextPrice = priced.price;
+          row.startRequestedAt = now();
+          await save();
           await d.start(row.ref);
-          row.resumeRequested = false;
-          row.startedAt = now();
-          (row.sessions ??= []).push({ start: now(), end: null });
-          row.lastActivity = now();
-          row.bootstrapped = false;
-          row.deadline = null;
+          openSession(row);
         }
         if (!row.bootstrapped) {
           row.state = "starting";
@@ -315,7 +413,10 @@ export async function createController({
     }
   }
   async function stop(row, d) {
-    if (row.state === "stopped") return;
+    if (row.state === "stopped") {
+      closeSession(row);
+      return;
+    }
     row.state = "stopping";
     await save();
     // A failed export keeps the machine until its provider lease expires.
@@ -327,7 +428,7 @@ export async function createController({
       return;
     }
     row.stoppedAt = now();
-    if (row.sessions?.at(-1)) row.sessions.at(-1).end = now();
+    closeSession(row);
     row.bootstrapped = false;
     await save();
   }
@@ -344,6 +445,9 @@ export async function createController({
           throw new Error("Invalid driver");
         if (input.driver !== "external" && (!input.image || typeof input.image !== "string"))
           throw new Error("Image or snapshot required");
+        const pricing = input.pricing === "provider" ? "provider" : undefined;
+        if (pricing && (input.driver !== "external" || !(input.endpoint || input.executable)))
+          throw new Error("Provider quotes need an external driver endpoint or executable");
         const p = {
           id,
           driver: input.driver,
@@ -355,11 +459,17 @@ export async function createController({
           executable: input.executable || undefined,
           endpoint: input.endpoint ? safeUrl(input.endpoint) : undefined,
           rehomePath: input.rehomePath || undefined,
-          hourlyRate: Number(input.hourlyRate ?? 0),
+          hourlyRate: pricing ? 0 : Number(input.hourlyRate ?? 0),
+          ...(pricing ? { pricing, choice: input.choice || undefined } : {}),
           capabilities: input.capabilities ?? { deadline: false, stopKeepsDisk: true },
         };
         if (!Number.isFinite(p.hourlyRate) || p.hourlyRate < 0)
           throw new Error("Invalid hourly rate");
+        if (pricing) {
+          const quote = await freshQuote(p, input.token);
+          if (!quote) throw new Error(`Provider quote refused: ${p.quoteError.message}`);
+          p.choice = quote.choice;
+        }
         state.profiles = state.profiles.filter((x) => x.id !== id).concat(p);
         if (input.token) await secrets.set(`provider-${id}`, input.token);
         await save();
@@ -380,8 +490,11 @@ export async function createController({
           (r) => r.desired === "running" && r.state !== "deleted",
         ).length;
         if (count >= state.policy.maxRunning) throw new Error("Running sandbox limit reached");
+        const quote = p.pricing === "provider" ? await freshQuote(p) : null;
+        if (p.pricing === "provider" && !quote)
+          throw new Error(`Provider quote failed: ${p.quoteError.message}`);
         if (state.policy.monthlyBudget > 0) {
-          if (!(p.hourlyRate > 0))
+          if (!quote && !(p.hourlyRate > 0))
             throw new Error("Configure an hourly rate before using a budget");
           if (usage(state.rows, state.profiles, now()).monthCost >= state.policy.monthlyBudget)
             throw new Error("Monthly estimated budget reached");
@@ -399,6 +512,8 @@ export async function createController({
           profile: p.id,
           title: String(input.title ?? "Sandbox").slice(0, 150),
           hourlyRate: p.hourlyRate,
+          ...(quote ? { price: snapshot(quote) } : {}),
+          ...(p.choice ? { choice: p.choice } : {}),
           repository: input.repository,
           base: input.base,
           message: input.message ?? null,
@@ -446,8 +561,10 @@ export async function createController({
         else if (["running", "stopped", "deleted"].includes(action)) {
           if (action === "deleted" && input.confirm !== true)
             throw new Error("Confirm permanent loss of workspace and thread data");
-          if (action === "running") {
-            if (row.state === "deleted") throw new Error("Deleted sandboxes cannot be resumed.");
+          // Resume only acts on a stopped sandbox; one already running or starting is left alone.
+          if (action === "running" && row.state === "deleted")
+            throw new Error("Deleted sandboxes cannot be resumed.");
+          if (action === "running" && !(row.desired === "running" && row.state !== "stopped")) {
             if (
               state.rows.filter(
                 (r) => r.id !== row.id && r.desired === "running" && r.state !== "deleted",
@@ -455,13 +572,24 @@ export async function createController({
             )
               throw new Error("Running sandbox limit reached");
             const p = profile(row.profile);
+            // A refused request leaves any earlier accepted resume and its price untouched.
+            const quote = p.pricing === "provider" ? await freshQuote(p) : null;
+            if (p.pricing === "provider" && !quote)
+              throw new Error(`Provider quote failed: ${p.quoteError.message}`);
             if (
               state.policy.monthlyBudget > 0 &&
-              (!(p.hourlyRate > 0) ||
+              ((!quote && !(p.hourlyRate > 0)) ||
                 usage(state.rows, state.profiles, now()).monthCost >= state.policy.monthlyBudget)
             )
               throw new Error("Monthly estimated budget reached or rate missing");
+            if (quote) row.nextPrice = snapshot(quote);
             row.resumeRequested = true;
+          }
+          // A start already sent keeps its time and price until the worker sees
+          // whether it ran; only a queued resume that never started is dropped.
+          if (action !== "running") {
+            row.resumeRequested = false;
+            if (!row.startRequestedAt) delete row.nextPrice;
           }
           row.desired = action;
           row.failures = 0;

@@ -24,7 +24,7 @@ The default idle stop is 15 minutes; pending questions get 60 minutes; unattende
 
 Before a controlled stop, the guest attempts to pause turns and checkpoint them; the controller exports each complete thread transcript to `transcripts/<sandbox-id>/` in its private plugin data directory. Export failure blocks a controlled stop; the provider's independent lease can still expire. Stopping preserves provider disk. Deletion after seven days only proceeds when transcripts were retained and all Git worktrees were verified clean and pushed, or Rehome retained it. Deleting the last thread starts the same safety check immediately. Otherwise it stays stopped. Explicit Delete requires a separate data-loss checkbox. Provider-side retention still applies independently.
 
-Boat keeps an independent stop deadline. Docker has no independent provider deadline, so its idle and lifetime limits require the controller to remain online. Usage shows runtime and estimated cost at each profile’s configured hourly rate. The monthly budget refuses creation and resume at the estimated cap; setting a budget without a rate refuses creation. Provider invoices remain authoritative.
+Boat keeps an independent stop deadline. Docker has no independent provider deadline, so its idle and lifetime limits require the controller to remain online. Usage shows runtime and estimated cost at the hourly rate, or the provider quote, each sandbox captured when it was created; replacing a profile never reprices existing rows. The monthly budget refuses creation and resume at the estimated cap; setting a budget without a rate or a fresh quote refuses creation. Provider invoices remain authoritative.
 
 Disable and Remove are guarded while managed resources remain. Stop and delete those resources first. On removal, transcripts are copied into `sandbox-archives` under the T3 home before the host clears plugin data. A crash or manual configuration edit still leaves the provider lease as the fallback for Boat.
 
@@ -35,6 +35,35 @@ Rehome is a bonus, not a dependency. Install Rehome on the controller and includ
 ## Other providers
 
 An external driver is either an executable receiving `{operation,input}` on stdin, or a JSON POST endpoint with a plugin-held bearer key. Operations are `list`, `create`, `get`, `start`, `stop`, `remove`, `setDeadline`, `exec`, `write`, and `expose`; `input` is an array of positional arguments. `list` returns observed records `{ref,name,state}`; create receives `{name,requestId,ttl}` and returns an observed record; get returns one; exec returns stdout; write takes resource id, absolute guest path, and UTF-8 contents; expose returns a credential-free origin. Create must be idempotent on requestId or name. Stop must keep disk. Do not advertise that guarantee for a provider whose stop destroys data.
+
+### Optional price quotes
+
+An external profile can take its price from the driver instead of a typed hourly rate: set **Price source** to "Provider quote". Drivers that do not implement `quote` keep working unchanged with a typed rate; the plugin calls `quote` only for profiles that opt in.
+
+`quote` takes no arguments (`{"operation":"quote","input":[]}`) and returns:
+
+```json
+{
+  "currency": "USD",
+  "unit": "minute",
+  "rounding": "up",
+  "validUntil": "2026-11-11T12:15:00Z",
+  "choices": [
+    { "id": "small", "label": "2 vCPU", "rate": 0.001 },
+    { "id": "large", "label": "8 vCPU", "rate": 0.004 }
+  ]
+}
+```
+
+- `currency` must be `USD`, the unit of the monthly budget. Other currencies are rejected.
+- `unit` is the billing unit for `rate`: `second`, `minute` or `hour`. `rounding` is `none` (prorated) or `up` (each session is rounded up to a whole unit; a session crossing a UTC month is rounded separately on each side, and the lifetime cost is the sum of those parts). Both fields are required; other values are rejected rather than assumed.
+- `choices` lists 1 to 50 resource options. `id` is 1 to 64 letters, digits, `.`, `_` or `-`, unique within the quote; `label` is an optional string; `rate` must be a JSON number from 0 to 1000. `null`, strings, booleans, arrays and non-finite values are rejected. A rate of `0` is a valid price.
+- `validUntil` is an optional ISO 8601 UTC timestamp of the form `YYYY-MM-DDTHH:MM:SS[.sss]Z`. Without it a quote is valid for 15 minutes after receipt. A quote that is already expired, or valid for more than 24 hours ahead, is rejected.
+- Other fields are ignored. In particular, account grants, free allowances and credits are not applied: the plugin sees only its own sandboxes, not what an account has spent elsewhere, so estimates and budgets use the quoted rate for every unit.
+
+The profile stores the choice it was saved with (blank selects the first listed). Saving the profile requests a quote and refuses a missing choice or an unusable quote. Afterwards the settings form offers the choices returned by saved profiles' quotes. The chosen id is passed to `create` as `{name,requestId,ttl,choice}`, so the driver provisions the size that was priced; profiles without a quote send no `choice`.
+
+Each create and resume requests a fresh quote. A failed, expired or invalid quote refuses the request, with or without a monthly budget, and the last accepted quote is never reused for a new request. A refused request changes nothing: an earlier accepted resume keeps its pending price. Resume only acts on a stopped sandbox; on one already running or starting it does nothing. Provisioning and starting run later in the background, so just before the provider `create` or `start` the worker checks the accepted quote again. If it has expired, the worker requests a fresh quote for the same choice. It uses that quote only if its currency, billing unit and rounding are identical to the accepted quote, its per-unit rate is no higher, and the budget is not yet reached. A change of unit or rounding is never accepted automatically, because a larger rounded unit can raise the minimum charge even at a lower hourly rate; otherwise, or if the refresh fails, it does not call the provider: a pending create is marked deleted with no billed time, a pending resume returns the sandbox to stopped, and the reason is shown as the sandbox's error. Request again to accept a higher price. A create whose request was already sent is reconciled by name as before and is not quoted again. The accepted quote is copied onto the sandbox for its first session and onto each resumed session, and is never changed afterwards. A session opens at the time `start` was requested, so a start whose reply is lost is still billed once the provider reports the sandbox running, even if Stop was requested in the meantime. The usage page lists each quoted profile's last accepted price, its age and validity, and the last refresh failure.
 
 ## Build a local guest image
 

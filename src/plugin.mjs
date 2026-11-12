@@ -57,6 +57,31 @@ const descriptor = (
       ),
     ),
 });
+const minutesAgo = (time, at) => `${Math.max(0, Math.round((time - at) / 60000))} min ago`;
+// One row per quoted profile: the last accepted quote, its age and validity, and any failed refresh.
+function quoteRows(state, time = Date.now()) {
+  return state.profiles
+    .filter((p) => p.pricing === "provider")
+    .map((p) => {
+      const q = p.quote;
+      return {
+        id: p.id,
+        cells: [
+          p.id,
+          q
+            ? `${q.label}: ${q.rate} ${q.currency} per ${q.unit}${q.rounding === "up" ? ", each session rounded up" : ""}`
+            : "No accepted quote",
+          q
+            ? `Provider quote from ${minutesAgo(time, q.quotedAt)}, ${q.validUntil > time ? "valid" : "expired"}`
+            : "None",
+          p.quoteError
+            ? `Refresh failed ${minutesAgo(time, p.quoteError.at)}: ${p.quoteError.message}`
+            : "Last refresh succeeded",
+        ],
+        actions: [],
+      };
+    });
+}
 function settings(controller) {
   const state = controller.snapshot();
   return {
@@ -102,6 +127,30 @@ function settings(controller) {
           kind: "select",
           options: ["docker", "boat", "external"].map((value) => ({ label: value, value })),
         },
+        {
+          name: "pricing",
+          label: "Price source",
+          kind: "select",
+          options: [
+            { label: "Typed hourly rate", value: "" },
+            { label: "Provider quote (external driver)", value: "provider" },
+          ],
+        },
+        {
+          name: "choice",
+          label: "Resource choice from the provider quote",
+          kind: "select",
+          options: [{ label: "First choice the provider lists", value: "" }].concat(
+            state.profiles
+              .filter((p) => p.quote)
+              .flatMap((p) =>
+                p.quote.choices.map((c) => ({
+                  label: `${p.id}: ${c.label} (${c.rate} ${p.quote.currency} per ${p.quote.unit})`,
+                  value: c.id,
+                })),
+              ),
+          ),
+        },
         field("image", "Docker image or Boat snapshot"),
         field("environment", "Boat environment (blank injects no credentials)"),
         field("url", "Tailnet URL override ({id} is replaced)"),
@@ -109,7 +158,12 @@ function settings(controller) {
         field("t3Command", "T3 executable in image", "text", "t3"),
         field("executable", "External driver executable"),
         field("rehomePath", "Optional Rehome plugin path inside guest image"),
-        field("hourlyRate", "Hourly rate for estimated cost and budget", "number", 0),
+        field(
+          "hourlyRate",
+          "Hourly rate for estimated cost and budget (typed rate only)",
+          "number",
+          0,
+        ),
         field("endpoint", "External driver HTTPS endpoint"),
         field("token", "External driver bearer key", "password"),
       ]),
@@ -617,7 +671,13 @@ export default {
                   {
                     id: "cost",
                     kind: "text",
-                    text: `Estimated month total: $${controller.usage().monthCost.toFixed(2)}. Rates are configured per profile; provider invoices are authoritative.`,
+                    text: `Estimated month total: $${controller.usage().monthCost.toFixed(2)}. Each sandbox keeps the typed rate or provider quote it was created with; provider invoices are authoritative.`,
+                  },
+                  {
+                    id: "quotes",
+                    kind: "table",
+                    columns: ["Profile", "Quoted price", "Source", "Refresh"],
+                    rows: quoteRows(controller.snapshot()),
                   },
                   {
                     id: "resources",
@@ -628,7 +688,7 @@ export default {
                       cells: [
                         item.title ?? item.id,
                         (item.seconds / 3600).toFixed(2),
-                        item.rateKnown ? "$" + item.cost.toFixed(2) : "Rate not configured",
+                        item.rateKnown ? "$" + item.cost.toFixed(2) : "No rate or quote",
                       ],
                       actions: [],
                     })),
